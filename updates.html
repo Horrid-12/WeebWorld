@@ -9,8 +9,8 @@
   </head>
   <body class="bg-zinc-900 text-white font-sans">
     <!-- Navbar -->
-    <nav class="bg-zinc-800 p-4 shadow-md flex justify-between items-center">
-      <h1 class="text-2xl font-bold text-blue-400">WeebWorld</h1>
+    <nav class="bg-zinc-800 p-4 shadow-md flex justify-between items-center px-6 py-4 z-50">
+      <h1 class="text-2xl font-extrabold text-blue-400"><a href="index.html">WeebWorld</a> 🌸</h1>
       <ul class="flex gap-6">
         <li><a href="index.html" class="hover:text-blue-300">Home</a></li>
         <li>
@@ -27,7 +27,7 @@
       </p>
     </header>
     <!-- Search Box -->
-    <div class="flex justify-center mt-6">
+    <div id="search-container" class="flex justify-center mt-6">
       <input
         type="text"
         id="search-input"
@@ -51,7 +51,7 @@
       </div>
     </div>
     <!-- Enhanced Filter Section -->
-    <div class="max-w-6xl mx-auto mt-8 px-6">
+    <div id="search-filters-container" class="max-w-6xl mx-auto mt-8 px-6">
       <div class="bg-zinc-800 rounded-xl p-6 shadow-lg">
         <h3 class="text-xl font-bold text-blue-400 mb-4 text-center">
           🎌 Filter & Sort Options 🎌
@@ -238,13 +238,15 @@
       </div>
     </div>
 
-    <!-- Favorites Section -->
-    <div id="favorites-section" class="max-w-6xl mx-auto mt-8 px-6 hidden">
-      <h3 class="text-2xl font-bold text-pink-400 mb-4">❤️ Your Favorites</h3>
-      <div id="favorites" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-        <!-- Favorite anime will be inserted here -->
-      </div>
-    </div>
+<!-- Favorites Section -->
+<div id="favorites-section" class="max-w-6xl mx-auto mt-8 px-6 hidden">
+  <h3 class="text-2xl font-bold text-pink-400 mb-4">❤️ Your Favorites</h3>
+  <div id="favorites" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+    <!-- Favorite anime will be inserted here -->
+  </div>
+</div>
+
+</div>
     <div
       id="pagination"
       class="flex justify-center items-center mt-10 gap-4 text-sm font-medium"
@@ -258,10 +260,8 @@
     </button>
 
     <!-- Footer -->
-    <footer
-      class="text-center text-zinc-500 py-6 border-t border-zinc-700 mt-10"
-    >
-      Made for weebs with ❤️
+    <footer class="w-full text-center text-gray-300 text-sm py-6 mt-12 border-t border-zinc-800">
+      Made with ❤️ by <span class="text-blue-400 font-bold">Clickify</span>
     </footer>
     <!-- Enhanced Anime Info Modal -->
     <div
@@ -358,7 +358,7 @@
             </div>
 
             <!-- External Links -->
-            <div class="flex gap-4 mt-6">
+            <div class="flex flex-wrap gap-4 mt-6">
               <a
                 id="modal-mal-link"
                 href="#"
@@ -396,7 +396,15 @@
         animation: modalOpen 0.3s ease-out;
       }
     </style>
-    <!-- Script -->
-    <script type="module" src="anime.js"></script>
+    <script type="module" src="/anime.js"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('sw.js')
+            .then(reg => console.log('Service Worker registered successfully:', reg.scope))
+            .catch(err => console.error('Service Worker registration failed:', err));
+        });
+      }
+    </script>
   </body>
 </html>
