@@ -1,3 +1,175 @@
+// === updates.js (WeebWorld Weekly Schedule & Resilient Fetching) ===
+const apiUrl = "https://api.jikan.moe/v4/seasons/now";
+const CACHE_KEY = "jikan_season_now_cache_v1";
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+let currentView = "live"; // "live" or "calendar"
+let selectedDay = "monday";
+let currentPage = 1;
+let currentData = [];
+let filteredData = [];
+let recentlyViewed = JSON.parse(localStorage.getItem("recentlyViewed") || "[]");
+let favorites = JSON.parse(localStorage.getItem("favorites") || "[]");
+let watchlist = JSON.parse(localStorage.getItem("watchlist") || "[]");
+
+// DOM Elements
+const animeCards = document.getElementById("anime-cards");
+const genreSelect = document.getElementById("genre-select");
+const statusSelect = document.getElementById("status-select");
+const seasonSelect = document.getElementById("season-select");
+const yearSelect = document.getElementById("year-select");
+const sortSelect = document.getElementById("sort-select");
+const searchInput = document.getElementById("search-input");
+const searchButton = document.getElementById("search-button");
+const clearFiltersBtn = document.getElementById("clear-filters");
+const clearSearchBtn = document.getElementById("clear-search");
+const pagination = document.getElementById("pagination");
+const resultsInfo = document.getElementById("results-info");
+const loadingSpinner = document.getElementById("loading-spinner");
+const noResults = document.getElementById("no-results");
+const modal = document.getElementById("anime-modal");
+const closeModal = document.getElementById("close-modal");
+
+const viewNowBtn = document.getElementById("view-now");
+const viewScheduleBtn = document.getElementById("view-schedule");
+const daySelector = document.getElementById("day-selector");
+const searchContainer = document.getElementById("search-container");
+const searchFiltersContainer = document.getElementById("search-filters-container");
+
+// Accessibility upgrades
+if (resultsInfo) resultsInfo.setAttribute("aria-live", "polite");
+if (modal) {
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-labelledby", "modal-title");
+}
+
+let previouslyFocusedEl = null;
+let trapFocusHandler = null;
+
+// Utilities
+function showLoading() {
+  loadingSpinner?.classList.remove("hidden");
+  animeCards?.classList.add("hidden");
+  noResults?.classList.add("hidden");
+}
+function hideLoading() {
+  loadingSpinner?.classList.add("hidden");
+  animeCards?.classList.remove("hidden");
+}
+function scrollToGridTop() {
+  try {
+    const top = (animeCards?.offsetTop || 0) - 80;
+    window.scrollTo({ top: top < 0 ? 0 : top, behavior: "smooth" });
+  } catch {}
+}
+
+// Debounce utility
+function debounce(fn, delay = 400) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), delay);
+  };
+}
+
+// Persist filters
+function saveFilters() {
+  const filters = {
+    genre: genreSelect?.value ?? "all",
+    status: statusSelect?.value ?? "",
+    season: seasonSelect?.value ?? "",
+    year: yearSelect?.value ?? "",
+    sort: sortSelect?.value ?? "default",
+    search: searchInput?.value ?? "",
+  };
+  localStorage.setItem("filters_updates", JSON.stringify(filters));
+}
+function loadFilters() {
+  const saved = JSON.parse(localStorage.getItem("filters_updates") || "{}");
+  if (saved.genre && genreSelect) genreSelect.value = saved.genre;
+  if (saved.status && statusSelect) statusSelect.value = saved.status;
+  if (saved.season && seasonSelect) seasonSelect.value = saved.season;
+  if (saved.year && yearSelect) yearSelect.value = saved.year;
+  if (saved.sort && sortSelect) sortSelect.value = saved.sort;
+  if (typeof saved.search === "string" && searchInput) searchInput.value = saved.search;
+}
+
+// Update results info
+function updateResultsInfo() {
+  const total = filteredData.length;
+  const startIndex = (currentPage - 1) * 9 + 1;
+  const endIndex = Math.min(currentPage * 9, total);
+  if (total === 0) {
+    resultsInfo.textContent = "No anime found";
+  } else {
+    resultsInfo.textContent = `Showing ${startIndex}-${endIndex} of ${total} anime`;
+  }
+}
+
+// Timezone formatter helper
+function formatBroadcastTime(broadcast) {
+  if (!broadcast || !broadcast.time || !broadcast.day) {
+    return { jst: "N/A", local: "N/A" };
+  }
+
+  const jstString = `${broadcast.day} at ${broadcast.time} (JST)`;
+
+  try {
+    const daysMap = {
+      "Sundays": 0, "Mondays": 1, "Tuesdays": 2, "Wednesdays": 3,
+      "Thursdays": 4, "Fridays": 5, "Saturdays": 6,
+      "Sunday": 0, "Monday": 1, "Tuesday": 2, "Wednesday": 3,
+      "Thursday": 4, "Friday": 5, "Saturday": 6
+    };
+
+    const broadcastDayStr = broadcast.day.trim();
+    const dayIndex = daysMap[broadcastDayStr];
+
+    if (dayIndex === undefined) {
+      return { jst: jstString, local: jstString };
+    }
+
+    const [hours, minutes] = broadcast.time.split(":").map(Number);
+
+    const baseDate = new Date();
+    let utcHour = hours - 9;
+    let utcDayDiff = 0;
+    if (utcHour < 0) {
+      utcHour += 24;
+      utcDayDiff = -1;
+    }
+
+    const currentDay = baseDate.getDay();
+    let dayDiff = dayIndex - currentDay;
+    baseDate.setDate(baseDate.getDate() + dayDiff + utcDayDiff);
+    baseDate.setUTCHours(utcHour, minutes, 0, 0);
+
+    const localDay = baseDate.getDay();
+    const localHour = String(baseDate.getHours()).padStart(2, '0');
+    const localMinute = String(baseDate.getMinutes()).padStart(2, '0');
+
+    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const localDayStr = dayNames[localDay];
+
+    let tzName = "";
+    try {
+      tzName = " " + Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const parts = tzName.split('/');
+      if (parts.length > 1) {
+        tzName = " (" + parts[parts.length - 1].replace('_', ' ') + ")";
+      }
+    } catch (e) {}
+
+    const localString = `${localDayStr}s at ${localHour}:${localMinute}${tzName}`;
+    return { jst: jstString, local: localString };
+
+  } catch (err) {
+    console.error("Timezone conversion failed", err);
+    return { jst: jstString, local: jstString };
+  }
+}
+
 // === Jikan API Fetch Manager with Queueing, Caching, and 429 Resiliency ===
 const JikanFetchManager = {
   cache: new Map(),
@@ -76,203 +248,6 @@ const JikanFetchManager = {
   }
 };
 
-const ITEMS_PER_PAGE = 9;
-const DEBOUNCE_DELAY = 400;
-const FETCH_TIMEOUT = 12000;
-const RECENTLY_VIEWED_LIMIT = 10;
-
-let currentPage = 1;
-let currentData = [];
-let filteredData = [];
-let recentlyViewed = JSON.parse(localStorage.getItem("recentlyViewed") || "[]");
-let favorites = JSON.parse(localStorage.getItem("favorites") || "[]");
-let watchlist = JSON.parse(localStorage.getItem("watchlist") || "[]");
-
-// DOM Elements
-const animeCards = document.getElementById("anime-cards");
-const genreSelect = document.getElementById("genre-select");
-const statusSelect = document.getElementById("status-select");
-const seasonSelect = document.getElementById("season-select");
-const yearSelect = document.getElementById("year-select");
-const sortSelect = document.getElementById("sort-select");
-const searchInput = document.getElementById("search-input");
-const searchButton = document.getElementById("search-button");
-const clearFiltersBtn = document.getElementById("clear-filters");
-const clearSearchBtn = document.getElementById("clear-search");
-const pagination = document.getElementById("pagination");
-const resultsInfo = document.getElementById("results-info");
-const loadingSpinner = document.getElementById("loading-spinner");
-const noResults = document.getElementById("no-results");
-const modal = document.getElementById("anime-modal");
-const closeModal = document.getElementById("close-modal");
-const daySelect = document.getElementById("day-select");
-const monthSelect = document.getElementById("month-select");
-const dayFilter = document.getElementById("day-filter");
-const monthFilter = document.getElementById("month-filter");
-const viewSeasonal = document.getElementById("view-seasonal");
-const viewWeekly = document.getElementById("view-weekly");
-const viewMonthly = document.getElementById("view-monthly");
-const viewYearly = document.getElementById("view-yearly");
-const pageHeading = document.getElementById("page-heading");
-const pageSubheading = document.getElementById("page-subheading");
-
-// --- Accessibility upgrades (safe if missing) ---
-if (resultsInfo) resultsInfo.setAttribute("aria-live", "polite");
-if (modal) {
-  modal.setAttribute("role", "dialog");
-  modal.setAttribute("aria-modal", "true");
-  modal.setAttribute("aria-labelledby", "modal-title");
-}
-
-let previouslyFocusedEl = null; // for focus restore
-let trapFocusHandler = null;
-
-// Utilities
-function showLoading() {
-  loadingSpinner?.classList.remove("hidden");
-  animeCards?.classList.add("hidden");
-  noResults?.classList.add("hidden");
-}
-function hideLoading() {
-  loadingSpinner?.classList.add("hidden");
-  animeCards?.classList.remove("hidden");
-}
-function scrollToGridTop() {
-  try {
-    const top = (animeCards?.offsetTop || 0) - 80;
-    window.scrollTo({ top: top < 0 ? 0 : top, behavior: "smooth" });
-  } catch {}
-}
-
-// Debounce utility
-function debounce(fn, delay = DEBOUNCE_DELAY) {
-  let t;
-  return (...args) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), delay);
-  };
-}
-
-const FALLBACK_IMG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='600' fill='%233f3f46'%3E%3Crect width='400' height='600'/%3E%3Ctext x='200' y='300' text-anchor='middle' fill='%23a1a1aa' font-size='20' font-family='sans-serif'%3ENo Poster%3C/text%3E%3C/svg%3E";
-function setImageFallback(img) {
-  if (!img) return;
-  img.addEventListener("error", () => { img.src = FALLBACK_IMG; img.removeEventListener("error", () => {}); });
-}
-
-function safeParse(value, fallback) {
-  if (value === null || value === undefined || value === "") return fallback;
-  try {
-    const parsed = JSON.parse(value);
-    return parsed === null ? fallback : parsed;
-  } catch {
-    return fallback;
-  }
-}
-
-// Persist filters
-function saveFilters() {
-  const filters = {
-    genre: genreSelect?.value ?? "all",
-    status: statusSelect?.value ?? "",
-    season: seasonSelect?.value ?? "",
-    year: yearSelect?.value ?? "",
-    sort: sortSelect?.value ?? "default",
-    search: searchInput?.value ?? "",
-    viewMode: currentViewMode,
-    day: daySelect?.value ?? "",
-    month: monthSelect?.value ?? "",
-  };
-  localStorage.setItem("filters", JSON.stringify(filters));
-}
-function loadFilters() {
-  const saved = safeParse(localStorage.getItem("filters"), {});
-  if (saved.genre && genreSelect) genreSelect.value = saved.genre;
-  if (saved.status && statusSelect) statusSelect.value = saved.status;
-  if (saved.season && seasonSelect) seasonSelect.value = saved.season;
-  if (saved.year && yearSelect) yearSelect.value = saved.year;
-  if (saved.sort && sortSelect) sortSelect.value = saved.sort;
-  if (typeof saved.search === "string" && searchInput) searchInput.value = saved.search;
-  if (saved.viewMode) {
-    setViewMode(saved.viewMode);
-    savedViewModeRestored = true;
-  }
-  if (saved.day && daySelect) daySelect.value = saved.day;
-  if (saved.month && monthSelect) monthSelect.value = saved.month;
-}
-
-function updateFilterVisibility() {
-  const isSeasonal = currentViewMode === "seasonal";
-  const isWeekly = currentViewMode === "weekly";
-  const isMonthly = currentViewMode === "monthly";
-  const isYearly = currentViewMode === "yearly";
-
-  // Season select: visible in seasonal + yearly (for yearly mode it's the season picker)
-  seasonSelect?.closest("div")?.classList.toggle("hidden", !isSeasonal && !isYearly);
-  // Year select: visible in seasonal + monthly + yearly
-  yearSelect?.closest("div")?.classList.toggle("hidden", isWeekly);
-  // Day filter: visible only in weekly mode
-  dayFilter?.classList.toggle("hidden", !isWeekly);
-  // Month filter: visible only in monthly mode
-  monthFilter?.classList.toggle("hidden", !isMonthly);
-}
-
-function setViewMode(mode) {
-  currentViewMode = mode;
-  // update tab styles
-  [viewSeasonal, viewWeekly, viewMonthly, viewYearly].forEach((btn) => {
-    btn?.classList.remove("bg-blue-500", "text-white");
-    btn?.classList.add("bg-zinc-700", "text-zinc-300", "hover:bg-zinc-600");
-  });
-  const activeBtn = { seasonal: viewSeasonal, weekly: viewWeekly, monthly: viewMonthly, yearly: viewYearly }[mode];
-  activeBtn?.classList.remove("bg-zinc-700", "text-zinc-300", "hover:bg-zinc-600");
-  activeBtn?.classList.add("bg-blue-500", "text-white");
-
-  // heading
-  const labels = {
-    seasonal: ["📅 Seasonal Anime", "Browse your favorite animes by season"],
-    weekly: ["📅 Weekly Schedule", "Browse your favorite animes by day"],
-    monthly: ["📅 Monthly Anime", "Browse your favorite animes by month"],
-    yearly: ["📅 Yearly Anime", "Browse your favorite animes by year"],
-  };
-  const [h, s] = labels[mode] || labels.seasonal;
-  if (pageHeading) pageHeading.textContent = h;
-  if (pageSubheading) pageSubheading.textContent = s;
-
-  // yearly: auto-select current year + season if empty
-  if (mode === "yearly") {
-    if (!yearSelect?.value) {
-      const now = new Date();
-      const y = now.getFullYear();
-      if (yearSelect) yearSelect.value = String(y);
-    }
-    if (!seasonSelect?.value) {
-      const m = new Date().getMonth() + 1;
-      let season = "winter";
-      if (m >= 3 && m <= 5) season = "spring";
-      else if (m >= 6 && m <= 8) season = "summer";
-      else if (m >= 9 && m <= 11) season = "fall";
-      if (seasonSelect) seasonSelect.value = season;
-    }
-  }
-
-  updateFilterVisibility();
-  currentPage = 1;
-  fetchAnime();
-  saveFilters();
-}
-
-// Update results info
-function updateResultsInfo() {
-  const total = filteredData.length;
-  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE + 1;
-  const endIndex = Math.min(currentPage * ITEMS_PER_PAGE, total);
-  if (total === 0) {
-    resultsInfo.textContent = "No anime found";
-  } else {
-    resultsInfo.textContent = `Showing ${startIndex}-${endIndex} of ${total} anime`;
-  }
-}
-
 // Modal helpers
 function setUpFavButton(anime) {
   const titleEl = document.getElementById("modal-title");
@@ -285,7 +260,7 @@ function setUpFavButton(anime) {
       "ml-3 px-3 py-1 rounded bg-pink-600 hover:bg-pink-700 text-white text-xs font-semibold";
     titleEl.parentNode.insertBefore(favBtn, titleEl.nextSibling);
   }
-  if (!favBtn) return; // gracefully skip if cannot place
+  if (!favBtn) return;
 
   const isFav = favorites.some((f) => f.mal_id === anime.mal_id);
   favBtn.textContent = isFav ? "♥ Favorited" : "♡ Favorite";
@@ -358,7 +333,6 @@ function openModal(anime) {
     imgEl.removeAttribute("src");
   }
   imgEl.alt = anime.title || "Anime poster";
-  setImageFallback(imgEl);
 
   document.getElementById("modal-episodes").textContent = anime.episodes || "N/A";
   document.getElementById("modal-score").textContent = anime.score ? `${anime.score}/10` : "N/A";
@@ -370,7 +344,7 @@ function openModal(anime) {
   document.getElementById("modal-aired").textContent = airedText;
 
   const genresContainer = document.getElementById("modal-genres");
-  genresContainer.innerHTML = ""; // safe to clear existing
+  genresContainer.innerHTML = "";
   if (Array.isArray(anime.genres) && anime.genres.length) {
     anime.genres.forEach((genre) => {
       const genreTag = document.createElement("span");
@@ -395,7 +369,6 @@ function openModal(anime) {
     ? anime.producers.slice(0, 3).map((p) => p.name).join(", ")
     : "No producer info";
 
-  // External Links (safe)
   const malLink = document.getElementById("modal-mal-link");
   safeSetHref(malLink, anime.url || "");
 
@@ -407,12 +380,10 @@ function openModal(anime) {
     trailerLink.classList.add("hidden");
   }
 
-  // Favorites button
   setUpFavButton(anime);
   setUpWatchlistButton(anime);
   updateWatchlistTrackerUI(anime);
 
-  // Show modal + focus trap
   previouslyFocusedEl = document.activeElement;
   modal.classList.remove("hidden");
   modal.style.display = "flex";
@@ -465,7 +436,6 @@ function toggleFavorite(anime) {
     });
   }
   localStorage.setItem("favorites", JSON.stringify(favorites));
-  renderFavorites();
 }
 
 // Watchlist Utilities
@@ -669,7 +639,7 @@ function addToRecentlyViewed(anime) {
     image: anime.images?.webp?.large_image_url || anime.images?.jpg?.large_image_url,
     score: anime.score,
   });
-  recentlyViewed = recentlyViewed.slice(0, RECENTLY_VIEWED_LIMIT);
+  recentlyViewed = recentlyViewed.slice(0, 10);
   localStorage.setItem("recentlyViewed", JSON.stringify(recentlyViewed));
   renderRecentlyViewed();
 }
@@ -697,51 +667,6 @@ function renderRecentlyViewed() {
     img.alt = anime.title || "Poster";
     img.loading = "lazy";
     img.className = "w-full h-20 object-cover rounded mb-2";
-    setImageFallback(img);
-
-    const title = document.createElement("p");
-    title.className = "text-xs text-white font-medium truncate";
-    title.textContent = anime.title;
-
-    const score = document.createElement("p");
-    score.className = "text-xs text-zinc-400";
-    score.textContent = anime.score ? `⭐ ${anime.score}` : "No score";
-
-    card.appendChild(img);
-    card.appendChild(title);
-    card.appendChild(score);
-
-    card.addEventListener("click", () => {
-      const fullAnime = currentData.find((a) => a.mal_id === anime.mal_id);
-      if (fullAnime) openModal(fullAnime);
-    });
-    container.appendChild(card);
-  });
-}
-
-function renderFavorites() {
-  const container = document.getElementById("favorites");
-  const section = document.getElementById("favorites-section");
-  if (!container || !section) return;
-
-  if (favorites.length === 0) {
-    section.classList.add("hidden");
-    return;
-  }
-
-  section.classList.remove("hidden");
-  container.innerHTML = "";
-
-  favorites.forEach((anime) => {
-    const card = document.createElement("div");
-    card.className = "bg-zinc-800 rounded-lg p-2 cursor-pointer hover:bg-zinc-700 transition-colors";
-
-    const img = document.createElement("img");
-    img.src = anime.image || "";
-    img.alt = anime.title || "Poster";
-    img.loading = "lazy";
-    img.className = "w-full h-28 object-cover rounded mb-2";
-    setImageFallback(img);
 
     const title = document.createElement("p");
     title.className = "text-xs text-white font-medium truncate";
@@ -767,49 +692,14 @@ function renderFavorites() {
   });
 }
 
-// Fetch with timeout + session cache
-function getApiUrl() {
-  if (currentViewMode === "weekly") return "https://api.jikan.moe/v4/schedules";
-  if (currentViewMode === "yearly") {
-    const season = seasonSelect?.value || "";
-    const year = yearSelect?.value || "";
-    if (season && year) return `https://api.jikan.moe/v4/seasons/${year}/${season}`;
-    return null;
-  }
-  return "https://api.jikan.moe/v4/seasons/now";
-}
-
-function getCacheKey() {
-  if (currentViewMode === "weekly") return "jikan_schedule_cache_v1";
-  if (currentViewMode === "yearly") {
-    const season = seasonSelect?.value || "";
-    const year = yearSelect?.value || "";
-    if (season && year) return `jikan_season_${year}_${season}_cache_v1`;
-  }
-  return "jikan_season_now_cache_v1";
-}
+// Data Fetching
 
 async function fetchAnime() {
   try {
     showLoading();
-    const url = getApiUrl();
-    if (!url) {
-      if (animeCards) {
-        animeCards.innerHTML = "";
-        const msg = document.createElement("p");
-        msg.className = "text-zinc-400 text-center py-10";
-        msg.textContent = "Select a year and season to browse.";
-        animeCards.appendChild(msg);
-      }
-      hideLoading();
-      return;
-    }
-    const cacheKey = getCacheKey();
-
-    // session cache
-    const cachedRaw = sessionStorage.getItem(cacheKey);
+    const cachedRaw = sessionStorage.getItem(CACHE_KEY);
     if (cachedRaw) {
-      const cached = safeParse(cachedRaw, {});
+      const cached = JSON.parse(cachedRaw);
       if (Date.now() - cached.time < CACHE_TTL && Array.isArray(cached.data)) {
         currentData = cached.data;
         applyFilters();
@@ -822,9 +712,8 @@ async function fetchAnime() {
     const data = await JikanFetchManager.fetch(apiUrl);
     currentData = data.data || [];
 
-    // save cache
     sessionStorage.setItem(
-      cacheKey,
+      CACHE_KEY,
       JSON.stringify({ time: Date.now(), data: currentData })
     );
 
@@ -839,7 +728,7 @@ async function fetchAnime() {
 
       const msg = document.createElement("p");
       msg.className = "text-red-500 mb-4";
-      msg.textContent = `⚠️ Failed to load anime data. ${error?.name === "AbortError" ? "Request timed out." : "Please try again."}`;
+      msg.textContent = `⚠️ Failed to load anime data. Please try again.`;
 
       const retryBtn = document.createElement("button");
       retryBtn.id = "retry-fetch";
@@ -856,16 +745,55 @@ async function fetchAnime() {
   }
 }
 
+async function fetchSchedule(day) {
+  try {
+    showLoading();
+    currentPage = 1;
+    
+    const url = `https://api.jikan.moe/v4/schedules?filter=${day}&sfw=true`;
+    const data = await JikanFetchManager.fetch(url);
+    
+    currentData = data.data || [];
+    filteredData = [...currentData];
+    
+    renderAnime();
+    renderPagination();
+    updateResultsInfo();
+    renderRecentlyViewed();
+  } catch (err) {
+    console.error("Weekly schedule fetch failed", err);
+    if (animeCards) {
+      animeCards.innerHTML = "";
+      const container = document.createElement("div");
+      container.className = "text-center py-10 text-zinc-300";
+      const msg = document.createElement("p");
+      msg.className = "text-red-500 mb-4";
+      msg.textContent = `⚠️ Failed to load schedule data. Please try again.`;
+      const retryBtn = document.createElement("button");
+      retryBtn.className = "px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600";
+      retryBtn.textContent = "Retry";
+      retryBtn.addEventListener("click", () => fetchSchedule(selectedDay));
+      container.appendChild(msg);
+      container.appendChild(retryBtn);
+      animeCards.appendChild(container);
+    }
+  } finally {
+    hideLoading();
+  }
+}
+
 // Filters + sort + search
 function applyFilters() {
+  if (currentView === "calendar") {
+    // Under calendar mode we display scheduling data without standard filters
+    return;
+  }
   const selectedGenre = genreSelect?.value ?? "all";
   const selectedStatus = statusSelect?.value ?? "";
   const selectedSeason = seasonSelect?.value ?? "";
   const selectedYear = yearSelect?.value ?? "";
   const selectedSort = sortSelect?.value ?? "default";
   const searchText = (searchInput?.value || "").toLowerCase();
-  const selectedDay = daySelect?.value ?? "";
-  const selectedMonth = monthSelect?.value ?? "";
 
   filteredData = (currentData || []).filter((anime) => {
     const matchesGenre =
@@ -884,20 +812,7 @@ function applyFilters() {
     const titleEn = (anime.title_english || "").toLowerCase();
     const matchesSearch = title.includes(searchText) || titleEn.includes(searchText);
 
-    let matchesDay = true;
-    if (selectedDay && anime.broadcast?.day) {
-      matchesDay = anime.broadcast.day.toLowerCase().includes(selectedDay.toLowerCase());
-    }
-
-    let matchesMonth = true;
-    if (selectedMonth && anime.aired?.from) {
-      const d = new Date(anime.aired.from);
-      if (!isNaN(d.getTime())) {
-        matchesMonth = String(d.getMonth() + 1) === selectedMonth;
-      }
-    }
-
-    return matchesGenre && matchesStatus && matchesSeason && matchesYear && matchesSearch && matchesDay && matchesMonth;
+    return matchesGenre && matchesStatus && matchesSeason && matchesYear && matchesSearch;
   });
 
   if (selectedSort !== "default") {
@@ -927,8 +842,8 @@ function applyFilters() {
 function renderAnime() {
   if (!animeCards) return;
   animeCards.innerHTML = "";
-  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
-  const pageData = filteredData.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  const startIndex = (currentPage - 1) * 9;
+  const pageData = filteredData.slice(startIndex, startIndex + 9);
 
   if (pageData.length === 0) {
     noResults?.classList.remove("hidden");
@@ -944,7 +859,6 @@ function renderAnime() {
     card.className =
       "bg-zinc-800 p-4 rounded-xl shadow-lg hover:shadow-blue-400 hover:scale-105 transition-all duration-300 cursor-pointer relative";
 
-    // Image wrapper
     const imgWrapper = document.createElement("div");
     imgWrapper.className = "relative";
 
@@ -955,7 +869,6 @@ function renderAnime() {
     img.className = "w-full h-60 object-cover rounded mb-3 transition-opacity duration-300";
     img.style.opacity = "0";
     img.addEventListener("load", () => { img.style.opacity = "1"; });
-    setImageFallback(img);
 
     const scoreBadge = document.createElement("div");
     scoreBadge.className = "absolute top-2 right-2 bg-black bg-opacity-70 text-white px-2 py-1 rounded text-xs";
@@ -973,7 +886,7 @@ function renderAnime() {
     eps.textContent = `Episodes: ${anime.episodes ?? "N/A"}`;
 
     const status = document.createElement("p");
-    status.className = "text-sm text-zinc-400";
+    status.className = "text-sm text-zinc-400 mb-2";
     status.textContent = `Status: ${anime.status || "N/A"}`;
 
     card.appendChild(imgWrapper);
@@ -981,31 +894,48 @@ function renderAnime() {
     card.appendChild(eps);
     card.appendChild(status);
 
+    // Render airing broadcast times under calendar view
+    if (currentView === "calendar" && anime.broadcast) {
+      const broadcastTime = formatBroadcastTime(anime.broadcast);
+      
+      const broadcastDiv = document.createElement("div");
+      broadcastDiv.className = "mt-2 pt-2 border-t border-zinc-700 text-xs text-zinc-400 space-y-1";
+      
+      const jstP = document.createElement("p");
+      jstP.textContent = `🇯🇵 JST: ${broadcastTime.jst}`;
+      
+      const localP = document.createElement("p");
+      localP.className = "text-blue-400 font-medium";
+      localP.textContent = `⏰ Local: ${broadcastTime.local}`;
+      
+      broadcastDiv.appendChild(jstP);
+      broadcastDiv.appendChild(localP);
+      card.appendChild(broadcastDiv);
+    }
+
     card.addEventListener("click", () => openModal(anime));
     animeCards.appendChild(card);
   });
 }
 
-function goToPage(page) {
-  currentPage = page;
-  renderAnime();
-  renderPagination();
-  updateResultsInfo();
-  scrollToGridTop();
-}
-
 function renderPagination() {
   if (!pagination) return;
   pagination.innerHTML = "";
-  const totalPages = Math.ceil(filteredData.length / ITEMS_PER_PAGE);
+  const totalPages = Math.ceil(filteredData.length / 9);
   if (totalPages <= 1) return;
 
   if (currentPage > 1) {
     const prevBtn = document.createElement("button");
     prevBtn.textContent = "← Previous";
     prevBtn.className =
-      "px-4 py-2 bg-zinc-700 text-zinc-300 hover:bg-blue-400 rounded-md transition-colors";
-    prevBtn.addEventListener("click", () => goToPage(currentPage - 1));
+      "px-4 py-2 bg-zinc-700 text-zinc-300 hover:bg-blue-400 rounded-md transition-colors cursor-pointer border-none";
+    prevBtn.addEventListener("click", () => {
+      currentPage--;
+      renderAnime();
+      renderPagination();
+      updateResultsInfo();
+      scrollToGridTop();
+    });
     pagination.appendChild(prevBtn);
   }
 
@@ -1015,10 +945,16 @@ function renderPagination() {
   for (let i = startPage; i <= endPage; i++) {
     const btn = document.createElement("button");
     btn.textContent = i;
-    btn.className = `px-3 py-2 rounded-md transition-colors ${
+    btn.className = `px-3 py-2 rounded-md transition-colors cursor-pointer border-none ${
       i === currentPage ? "bg-blue-500 text-white" : "bg-zinc-700 text-zinc-300 hover:bg-blue-400"
     }`;
-    btn.addEventListener("click", () => goToPage(i));
+    btn.addEventListener("click", () => {
+      currentPage = i;
+      renderAnime();
+      renderPagination();
+      updateResultsInfo();
+      scrollToGridTop();
+    });
     pagination.appendChild(btn);
   }
 
@@ -1026,8 +962,14 @@ function renderPagination() {
     const nextBtn = document.createElement("button");
     nextBtn.textContent = "Next →";
     nextBtn.className =
-      "px-4 py-2 bg-zinc-700 text-zinc-300 hover:bg-blue-400 rounded-md transition-colors";
-    nextBtn.addEventListener("click", () => goToPage(currentPage + 1));
+      "px-4 py-2 bg-zinc-700 text-zinc-300 hover:bg-blue-400 rounded-md transition-colors cursor-pointer border-none";
+    nextBtn.addEventListener("click", () => {
+      currentPage++;
+      renderAnime();
+      renderPagination();
+      updateResultsInfo();
+      scrollToGridTop();
+    });
     pagination.appendChild(nextBtn);
   }
 }
@@ -1040,8 +982,6 @@ function clearAllFilters() {
   if (yearSelect) yearSelect.value = "";
   if (sortSelect) sortSelect.value = "default";
   if (searchInput) searchInput.value = "";
-  if (daySelect) daySelect.value = "";
-  if (monthSelect) monthSelect.value = "";
   currentPage = 1;
   applyFilters();
 }
@@ -1049,24 +989,15 @@ function clearAllFilters() {
 // Event Listeners
 genreSelect?.addEventListener("change", () => { currentPage = 1; applyFilters(); });
 statusSelect?.addEventListener("change", () => { currentPage = 1; applyFilters(); });
-seasonSelect?.addEventListener("change", () => {
-  currentPage = 1;
-  if (currentViewMode === "yearly") fetchAnime();
-  else applyFilters();
-});
-yearSelect?.addEventListener("change", () => {
-  currentPage = 1;
-  if (currentViewMode === "yearly") fetchAnime();
-  else applyFilters();
-});
+seasonSelect?.addEventListener("change", () => { currentPage = 1; applyFilters(); });
+yearSelect?.addEventListener("change", () => { currentPage = 1; applyFilters(); });
 sortSelect?.addEventListener("change", () => { currentPage = 1; applyFilters(); });
 
 searchButton?.addEventListener("click", () => { currentPage = 1; applyFilters(); });
 searchInput?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { currentPage = 1; applyFilters(); }
 });
-// Debounced live search
-const debouncedSearch = debounce(() => { currentPage = 1; applyFilters(); }, DEBOUNCE_DELAY);
+const debouncedSearch = debounce(() => { currentPage = 1; applyFilters(); }, 400);
 searchInput?.addEventListener("input", debouncedSearch);
 
 clearFiltersBtn?.addEventListener("click", clearAllFilters);
@@ -1075,6 +1006,68 @@ closeModal?.addEventListener("click", closeModalFn);
 modal?.addEventListener("click", (e) => { if (e.target === modal) closeModalFn(); });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !modal.classList.contains("hidden")) closeModalFn();
+});
+
+// View switching logic
+viewNowBtn?.addEventListener("click", () => {
+  if (currentView === "live") return;
+  currentView = "live";
+  
+  viewNowBtn.className = "px-5 py-2.5 bg-blue-600 text-white rounded-xl font-bold transition-all hover:scale-105 cursor-pointer border-none";
+  viewScheduleBtn.className = "px-5 py-2.5 bg-zinc-800 text-gray-300 hover:text-white rounded-xl font-bold transition-all hover:scale-105 cursor-pointer border border-zinc-700";
+  
+  searchContainer?.classList.remove("hidden");
+  searchFiltersContainer?.classList.remove("hidden");
+  daySelector?.classList.add("hidden");
+
+  fetchAnime();
+});
+
+viewScheduleBtn?.addEventListener("click", () => {
+  if (currentView === "calendar") return;
+  currentView = "calendar";
+
+  viewScheduleBtn.className = "px-5 py-2.5 bg-blue-600 text-white rounded-xl font-bold transition-all hover:scale-105 cursor-pointer border-none";
+  viewNowBtn.className = "px-5 py-2.5 bg-zinc-800 text-gray-300 hover:text-white rounded-xl font-bold transition-all hover:scale-105 cursor-pointer border border-zinc-700";
+
+  searchContainer?.classList.add("hidden");
+  searchFiltersContainer?.classList.add("hidden");
+  daySelector?.classList.remove("hidden");
+
+  const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  const today = dayNames[new Date().getDay()];
+  
+  const dayButtons = document.querySelectorAll(".day-btn");
+  dayButtons.forEach(btn => {
+    if (btn.getAttribute("data-day") === today) {
+      btn.classList.add("bg-blue-600", "text-white");
+      btn.classList.remove("bg-zinc-800", "text-gray-300");
+      selectedDay = today;
+    } else {
+      btn.classList.remove("bg-blue-600", "text-white");
+      btn.classList.add("bg-zinc-800", "text-gray-300");
+    }
+  });
+
+  fetchSchedule(selectedDay);
+});
+
+document.querySelectorAll(".day-btn").forEach(btn => {
+  btn.addEventListener("click", (e) => {
+    const clickedDay = e.target.getAttribute("data-day");
+    if (selectedDay === clickedDay) return;
+    
+    selectedDay = clickedDay;
+    
+    document.querySelectorAll(".day-btn").forEach(b => {
+      b.classList.remove("bg-blue-600", "text-white");
+      b.classList.add("bg-zinc-800", "text-gray-300");
+    });
+    e.target.classList.add("bg-blue-600", "text-white");
+    e.target.classList.remove("bg-zinc-800", "text-gray-300");
+
+    fetchSchedule(selectedDay);
+  });
 });
 
 // --- Watchlist Import/Export Logic ---
@@ -1127,7 +1120,6 @@ importFile?.addEventListener("change", (e) => {
 });
 
 // Initialize
-populateYearFilter();
 loadFilters();
 fetchAnime();
 renderWatchlist();
