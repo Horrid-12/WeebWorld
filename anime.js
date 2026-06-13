@@ -1,80 +1,5 @@
-// === Jikan API Fetch Manager with Queueing, Caching, and 429 Resiliency ===
-const JikanFetchManager = {
-  cache: new Map(),
-  queue: [],
-  isProcessing: false,
-  lastRequestTime: 0,
-  minRequestGap: 350,
-
-  async fetch(url, options = {}) {
-    const cached = this.cache.get(url);
-    if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
-      return cached.data;
-    }
-    return new Promise((resolve, reject) => {
-      this.queue.push({ url, options, resolve, reject, retries: 0 });
-      this.processQueue();
-    });
-  },
-
-  async processQueue() {
-    if (this.isProcessing || this.queue.length === 0) return;
-    this.isProcessing = true;
-
-    while (this.queue.length > 0) {
-      const request = this.queue[0];
-      const now = Date.now();
-      const timeSinceLast = now - this.lastRequestTime;
-      const delay = Math.max(0, this.minRequestGap - timeSinceLast);
-
-      if (delay > 0) {
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-
-      this.lastRequestTime = Date.now();
-
-      try {
-        const response = await fetch(request.url, request.options);
-        
-        if (response.status === 429) {
-          const backoff = Math.pow(2, request.retries) * 1500;
-          console.warn(`Jikan API 429 Rate Limit hit. Retrying in ${backoff}ms...`);
-          
-          if (request.retries >= 3) {
-            this.queue.shift();
-            request.reject(new Error("API Error 429: Rate Limit Exceeded after retries"));
-          } else {
-            request.retries++;
-            await new Promise(resolve => setTimeout(resolve, backoff));
-          }
-          continue;
-        }
-
-        if (!response.ok) {
-          throw new Error(`API Error: ${response.status} ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        
-        if (data && data.data) {
-          this.cache.set(request.url, {
-            data: data,
-            timestamp: Date.now()
-          });
-        }
-
-        this.queue.shift();
-        request.resolve(data);
-
-      } catch (error) {
-        console.error("Fetch failed for url:", request.url, error);
-        this.queue.shift();
-        request.reject(error);
-      }
-    }
-    this.isProcessing = false;
-  }
-};
+// === Enhanced anime.js (secure DOM updates, safer URL handling) ===
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
 const ITEMS_PER_PAGE = 9;
 const DEBOUNCE_DELAY = 400;
@@ -84,9 +9,10 @@ const RECENTLY_VIEWED_LIMIT = 10;
 let currentPage = 1;
 let currentData = [];
 let filteredData = [];
-let recentlyViewed = JSON.parse(localStorage.getItem("recentlyViewed") || "[]");
-let favorites = JSON.parse(localStorage.getItem("favorites") || "[]");
-let watchlist = JSON.parse(localStorage.getItem("watchlist") || "[]");
+let recentlyViewed = safeParse(localStorage.getItem("recentlyViewed"), []);
+let favorites = safeParse(localStorage.getItem("favorites"), []);
+let currentViewMode = "seasonal";
+let savedViewModeRestored = false;
 
 // DOM Elements
 const animeCards = document.getElementById("anime-cards");
@@ -409,8 +335,6 @@ function openModal(anime) {
 
   // Favorites button
   setUpFavButton(anime);
-  setUpWatchlistButton(anime);
-  updateWatchlistTrackerUI(anime);
 
   // Show modal + focus trap
   previouslyFocusedEl = document.activeElement;
@@ -437,20 +361,6 @@ function closeModalFn() {
   }, 300);
 }
 
-async function openModalById(id) {
-  showLoading();
-  try {
-    const data = await JikanFetchManager.fetch(`https://api.jikan.moe/v4/anime/${id}`);
-    if (data && data.data) {
-      openModal(data.data);
-    }
-  } catch (err) {
-    console.error("Failed to load anime details", err);
-  } finally {
-    hideLoading();
-  }
-}
-
 // Favorites
 function toggleFavorite(anime) {
   const exists = favorites.some((f) => f.mal_id === anime.mal_id);
@@ -466,198 +376,6 @@ function toggleFavorite(anime) {
   }
   localStorage.setItem("favorites", JSON.stringify(favorites));
   renderFavorites();
-}
-
-// Watchlist Utilities
-function setUpWatchlistButton(anime) {
-  const watchBtn = document.getElementById("modal-watchlist-btn");
-  if (!watchBtn) return;
-  
-  const isWatch = watchlist.some((w) => w.mal_id === anime.mal_id);
-  watchBtn.textContent = isWatch ? "✓ In Watchlist" : "+ Watchlist";
-  watchBtn.className = `px-4 py-2 rounded-lg text-sm font-semibold transition-colors border cursor-pointer ${
-    isWatch 
-      ? "bg-blue-600 border-blue-500 text-white hover:bg-blue-700" 
-      : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-700"
-  }`;
-  
-  watchBtn.onclick = () => {
-    toggleWatchlist(anime);
-    setUpWatchlistButton(anime);
-    updateWatchlistTrackerUI(anime);
-  };
-}
-
-function toggleWatchlist(anime) {
-  const exists = watchlist.some((w) => w.mal_id === anime.mal_id);
-  if (exists) {
-    watchlist = watchlist.filter((w) => w.mal_id !== anime.mal_id);
-  } else {
-    watchlist.push({
-      mal_id: anime.mal_id,
-      title: anime.title,
-      image: anime.images?.webp?.large_image_url || anime.images?.jpg?.large_image_url || anime.image,
-      score: anime.score,
-      watched_episodes: 0,
-      status: 'Plan to Watch',
-      total_episodes: anime.episodes || '?'
-    });
-  }
-  localStorage.setItem("watchlist", JSON.stringify(watchlist));
-  renderWatchlist();
-}
-
-function renderWatchlist() {
-  const container = document.getElementById("watchlist");
-  const section = document.getElementById("watchlist-section");
-  if (!container || !section) return;
-
-  if (watchlist.length === 0) {
-    section.classList.add("hidden");
-    return;
-  }
-
-  section.classList.remove("hidden");
-  container.innerHTML = "";
-
-  watchlist.forEach((anime) => {
-    const watched = anime.watched_episodes || 0;
-    const total = anime.total_episodes || '?';
-    const status = anime.status || 'Plan to Watch';
-    
-    let progressPercent = 0;
-    if (typeof total === 'number' && total > 0) {
-      progressPercent = Math.min(100, Math.round((watched / total) * 100));
-    } else if (status === 'Completed') {
-      progressPercent = 100;
-    }
-    
-    let statusClass = "text-zinc-400 bg-zinc-500/10";
-    if (status === 'Watching') statusClass = "text-blue-400 bg-blue-500/10";
-    else if (status === 'Completed') statusClass = "text-green-400 bg-green-500/10";
-
-    const card = document.createElement("div");
-    card.className =
-      "flex flex-col bg-zinc-800 rounded-lg p-3 hover:bg-zinc-700 transition-colors w-full cursor-pointer relative group";
-
-    card.innerHTML = `
-      <div class="relative aspect-[3/4] rounded mb-2 overflow-hidden">
-        <img src="${anime.image || ''}" class="w-full h-full object-cover" loading="lazy">
-        <div class="absolute top-1 left-1 px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider ${statusClass}">
-          ${status}
-        </div>
-      </div>
-      <p class="text-xs text-white font-medium truncate mb-1">${anime.title}</p>
-      <div class="flex justify-between items-center text-[10px] text-zinc-400 mb-1">
-        <span>Ep ${watched} / ${total}</span>
-        <span>${progressPercent}%</span>
-      </div>
-      <div class="w-full bg-zinc-900 h-1 rounded overflow-hidden">
-        <div class="bg-blue-500 h-full rounded transition-all duration-300" style="width: ${progressPercent}%"></div>
-      </div>
-    `;
-
-    card.addEventListener("click", () => {
-      const fullAnime = currentData.find((a) => a.mal_id === anime.mal_id);
-      if (fullAnime) {
-        openModal(fullAnime);
-      } else {
-        openModalById(anime.mal_id);
-      }
-    });
-    container.appendChild(card);
-  });
-}
-
-function updateWatchlistTrackerUI(anime) {
-  const trackerDiv = document.getElementById("modal-watchlist-tracker");
-  if (!trackerDiv) return;
-
-  const item = watchlist.find((w) => w.mal_id === anime.mal_id);
-  if (!item) {
-    trackerDiv.classList.add("hidden");
-    trackerDiv.innerHTML = "";
-    return;
-  }
-
-  trackerDiv.classList.remove("hidden");
-  const watched = item.watched_episodes || 0;
-  const total = item.total_episodes || '?';
-  const status = item.status || 'Plan to Watch';
-
-  trackerDiv.innerHTML = `
-    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
-      <div class="flex-grow">
-        <h4 class="text-xs font-bold text-blue-400 mb-2 uppercase tracking-wider font-sans">Watch Progress Tracker</h4>
-        <div class="flex items-center gap-4 flex-wrap">
-          <div class="flex flex-col">
-            <label class="text-[9px] text-zinc-400 font-semibold mb-1 uppercase font-sans">Status</label>
-            <select id="tracker-status" class="bg-zinc-900 border border-zinc-700 text-white text-xs p-2 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 cursor-pointer">
-              <option value="Plan to Watch" ${status === 'Plan to Watch' ? 'selected' : ''}>Plan to Watch</option>
-              <option value="Watching" ${status === 'Watching' ? 'selected' : ''}>Watching</option>
-              <option value="Completed" ${status === 'Completed' ? 'selected' : ''}>Completed</option>
-            </select>
-          </div>
-          <div class="flex flex-col">
-            <label class="text-[9px] text-zinc-400 font-semibold mb-1 uppercase font-sans">Episodes Watched</label>
-            <div class="flex items-center gap-1">
-              <button id="tracker-dec" class="w-8 h-8 rounded bg-zinc-900 hover:bg-zinc-700 text-white flex items-center justify-center font-bold cursor-pointer border border-zinc-700">-</button>
-              <input type="number" id="tracker-watched" value="${watched}" min="0" max="${typeof total === 'number' ? total : ''}" class="w-12 h-8 text-center bg-zinc-900 border border-zinc-700 rounded text-xs font-bold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none text-white">
-              <span class="text-zinc-400 font-bold text-xs ml-1">/ ${total}</span>
-              <button id="tracker-inc" class="w-8 h-8 rounded bg-zinc-900 hover:bg-zinc-700 text-white flex items-center justify-center font-bold cursor-pointer border border-zinc-700">+</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  const statusSelect = document.getElementById("tracker-status");
-  const watchedInput = document.getElementById("tracker-watched");
-  const decBtn = document.getElementById("tracker-dec");
-  const incBtn = document.getElementById("tracker-inc");
-
-  const saveTrackerData = () => {
-    let newWatched = parseInt(watchedInput.value) || 0;
-    if (newWatched < 0) newWatched = 0;
-    if (typeof total === 'number' && newWatched > total) newWatched = total;
-
-    watchedInput.value = newWatched;
-    item.watched_episodes = newWatched;
-
-    if (typeof total === 'number' && newWatched === total) {
-      statusSelect.value = "Completed";
-    }
-
-    item.status = statusSelect.value;
-
-    localStorage.setItem("watchlist", JSON.stringify(watchlist));
-    renderWatchlist();
-  };
-
-  statusSelect.onchange = saveTrackerData;
-  watchedInput.onchange = saveTrackerData;
-
-  decBtn.onclick = () => {
-    let val = parseInt(watchedInput.value) || 0;
-    if (val > 0) {
-      watchedInput.value = val - 1;
-      saveTrackerData();
-    }
-  };
-
-  incBtn.onclick = () => {
-    let val = parseInt(watchedInput.value) || 0;
-    if (typeof total === 'number') {
-      if (val < total) {
-        watchedInput.value = val + 1;
-        saveTrackerData();
-      }
-    } else {
-      watchedInput.value = val + 1;
-      saveTrackerData();
-    }
-  };
 }
 
 // Recently viewed
@@ -757,11 +475,7 @@ function renderFavorites() {
 
     card.addEventListener("click", () => {
       const fullAnime = currentData.find((a) => a.mal_id === anime.mal_id);
-      if (fullAnime) {
-        openModal(fullAnime);
-      } else {
-        openModalById(anime.mal_id);
-      }
+      if (fullAnime) openModal(fullAnime);
     });
     container.appendChild(card);
   });
@@ -819,7 +533,14 @@ async function fetchAnime() {
       }
     }
 
-    const data = await JikanFetchManager.fetch(apiUrl);
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(t);
+
+    if (!response.ok) throw new Error("Network response was not ok");
+    const data = await response.json();
     currentData = data.data || [];
 
     // save cache
@@ -1077,57 +798,43 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !modal.classList.contains("hidden")) closeModalFn();
 });
 
-// --- Watchlist Import/Export Logic ---
-document.getElementById("export-watchlist")?.addEventListener("click", () => {
-  if (watchlist.length === 0) {
-    alert("Your watchlist is empty!");
-    return;
+// View Mode Tabs
+viewSeasonal?.addEventListener("click", () => setViewMode("seasonal"));
+viewWeekly?.addEventListener("click", () => setViewMode("weekly"));
+viewMonthly?.addEventListener("click", () => setViewMode("monthly"));
+viewYearly?.addEventListener("click", () => setViewMode("yearly"));
+
+// Day / Month filters
+daySelect?.addEventListener("change", () => { currentPage = 1; applyFilters(); });
+monthSelect?.addEventListener("change", () => { currentPage = 1; applyFilters(); });
+
+// Scroll to top
+const scrollTopBtn = document.getElementById("scroll-top-btn");
+if (scrollTopBtn) {
+  window.addEventListener("scroll", () => {
+    scrollTopBtn.classList.toggle("hidden", window.scrollY < 400);
+  });
+  scrollTopBtn.addEventListener("click", () => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  });
+}
+
+// Populate year filter with dynamic range
+function populateYearFilter() {
+  const yearSelect = document.getElementById("year-select");
+  if (!yearSelect) return;
+  const currentYear = new Date().getFullYear();
+  for (let y = currentYear; y >= 1970; y--) {
+    const opt = document.createElement("option");
+    opt.value = String(y);
+    opt.textContent = String(y);
+    yearSelect.appendChild(opt);
   }
-  const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(watchlist, null, 2));
-  const downloadAnchor = document.createElement('a');
-  downloadAnchor.setAttribute("href", dataStr);
-  downloadAnchor.setAttribute("download", "weebworld-watchlist.json");
-  document.body.appendChild(downloadAnchor);
-  downloadAnchor.click();
-  downloadAnchor.remove();
-});
-
-const importFile = document.getElementById("import-file");
-document.getElementById("import-watchlist")?.addEventListener("click", () => {
-  importFile?.click();
-});
-
-importFile?.addEventListener("change", (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  
-  const reader = new FileReader();
-  reader.onload = (event) => {
-    try {
-      const imported = JSON.parse(event.target.result);
-      if (Array.isArray(imported)) {
-        const isValid = imported.every(item => item && item.mal_id && item.title);
-        if (isValid) {
-          watchlist = imported;
-          localStorage.setItem("watchlist", JSON.stringify(watchlist));
-          renderWatchlist();
-          alert("Watchlist imported successfully!");
-        } else {
-          alert("Invalid file format. Ensure it contains a valid watchlist.");
-        }
-      } else {
-        alert("Invalid file format. Watchlist must be a JSON array.");
-      }
-    } catch (err) {
-      alert("Failed to parse JSON file.");
-      console.error(err);
-    }
-  };
-  reader.readAsText(file);
-});
+}
 
 // Initialize
 populateYearFilter();
 loadFilters();
-fetchAnime();
-renderWatchlist();
+renderFavorites();
+renderRecentlyViewed();
+if (!savedViewModeRestored) fetchAnime();
